@@ -1,4 +1,4 @@
-﻿/// <summary>
+/// <summary>
 /// Starlight.AuditHistory.WebApi.Controllers
 /// </summary>
 namespace Starlight.AuditHistory.WebApi.Controllers
@@ -11,16 +11,21 @@ namespace Starlight.AuditHistory.WebApi.Controllers
     using System.Net.Http;
     using System.Reflection;
     using System.ServiceModel.Description;
+    using Microsoft.IdentityModel.Clients.ActiveDirectory;
     using System.Text;
     using System.Web.Http;
-    using System.Web.Script.Serialization;
+    //using System.Web.Script.Serialization;
     using Microsoft.Crm.Sdk.Messages;
     using Microsoft.Xrm.Sdk;
+    using Microsoft.Xrm.Sdk.WebServiceClient;
     using Microsoft.Xrm.Sdk.Client;
     using Microsoft.Xrm.Sdk.Query;
     using Models;
     using Newtonsoft.Json;
     using System.Linq;
+    using System.Web.Script.Serialization;
+    using Microsoft.Xrm.Sdk.Messages;
+    using Microsoft.Xrm.Sdk.Metadata;
 
     /// <summary>
     /// Class for Audit history
@@ -30,8 +35,16 @@ namespace Starlight.AuditHistory.WebApi.Controllers
         /// <summary>
         /// The IOrganization Service
         /// </summary>
-        private IOrganizationService organizationService;
-
+        private IOrganizationService organizationService; 
+        string EntityLogicalName = "";
+        string EntiryDisplayName = "";
+        private static Dictionary<string, string> AttrFullNameDispNameMap = new Dictionary<string, string>();
+        private RetrieveEntityResponse EntityMetaResponse;
+        private DateTime startDate_search;
+        private DateTime endDate_search;
+        private Guid? id_search;
+        private string entityName_search;
+        private string searchString;
         /// <summary>
         /// The DataTable
         /// </summary>
@@ -54,7 +67,10 @@ namespace Starlight.AuditHistory.WebApi.Controllers
             try
             {
                 this.InitializeComponents();
+                //QUERY DATA FROM AZURE TABLE
+
                 List<AuditDetails> lstAzureDetails = this.GetAuditDetailsFromAzure(id, entityName);
+                //QUERY DATA FROM CRM
                 List<AuditDetails> lstDetails = this.GetAuditDetailsFromCRM(id, entityName);
                 lstDetails.AddRange(lstAzureDetails);
                 lstDetails = lstDetails.OrderByDescending(x => x.ChangedDate).ToList();
@@ -75,11 +91,84 @@ namespace Starlight.AuditHistory.WebApi.Controllers
                 throw new WebException(ex.Message);
             }
         }
+        public static void ValidateFieldSecurity()
+        {
+           
 
-        /// <summary>
-        /// This is to Initialize the Components
-        /// </summary>
-        private void InitializeComponents()
+            // Instantiate QueryExpression query
+            var query = new QueryExpression("fieldsecurityprofile");
+            query.TopCount = 50;
+            // Add all columns to query.ColumnSet
+            query.ColumnSet.AllColumns = true;
+            // Add link-entity query_systemuserprofiles
+            var query_systemuserprofiles = query.AddLink("systemuserprofiles", "fieldsecurityprofileid", "fieldsecurityprofileid");
+            // Add all columns to query_systemuserprofiles.Columns
+            query_systemuserprofiles.Columns.AllColumns = true;
+        
+        
+        
+        }
+        [Route("api/audits/{id}/{entityName}/{searchString}")]
+        public HttpResponseMessage GetByDate(Guid? id, string entityName, string searchString)
+        {
+            Console.WriteLine("******************* ");
+            this.searchString = searchString;
+            id_search = id;
+            entityName_search = entityName;
+            HttpResponseMessage result = Get(id_search, entityName);
+            //ProcessRequest();
+
+
+            return result;
+        }
+        [Route("api/audits/{id}/{entityName}/{startDateStr}/{endDateStr}")]
+        public HttpResponseMessage GetByDate(Guid? id, string entityName, string startDateStr, string endDateStr)
+        {
+            Console.WriteLine("******************* ");
+            startDate_search =  Convert.ToDateTime("11/1/2022 12:00:00 AM"); // 1/1/0001 12:00:00 AM
+            endDate_search = Convert.ToDateTime("11/1/2022 12:00:00 AM"); // 1/1/0001 12:00:00 AM
+            id_search = id;
+            entityName_search = entityName;
+            ProcessRequest();
+
+
+            return null;
+        }
+        public HttpResponseMessage ProcessRequest()
+        {
+            try
+            {
+                this.InitializeComponents();
+                //QUERY DATA FROM AZURE TABLE
+
+                List<AuditDetails> lstAzureDetails = this.GetAuditDetailsFromAzure(id_search, entityName_search);
+                //QUERY DATA FROM CRM
+                List<AuditDetails> lstDetails = this.GetAuditDetailsFromCRM(id_search, entityName_search);
+                lstDetails.AddRange(lstAzureDetails);
+                lstDetails = lstDetails.OrderByDescending(x => x.ChangedDate).ToList();
+                var strJson = JsonConvert.SerializeObject(lstDetails);
+                if (!string.IsNullOrEmpty(strJson))
+                {
+                    var response = Request.CreateResponse(HttpStatusCode.OK);
+                    response.Content = new StringContent(strJson, Encoding.UTF8, "application/json");
+                    return response;
+                }
+                else
+                {
+                    throw new HttpResponseException(HttpStatusCode.NotFound);
+                }
+            }
+            catch (Exception ex)
+            {
+                throw new WebException(ex.Message);
+            }
+
+            return null;
+        }
+            /// <summary>
+            /// This is to Initialize the Components
+            /// </summary>
+            private void InitializeComponents()
         {
             this.dtcombined = this.CreateCombinedDataTable();
             this.dtAzureCombined = this.CreateCombinedDataTable();
@@ -98,6 +187,20 @@ namespace Starlight.AuditHistory.WebApi.Controllers
             string storageAccount = ConfigurationManager.AppSettings["StorageAccount"];
             string accessKey = ConfigurationManager.AppSettings["AccessKey"];
             string resourcePath = "AuditDetailCollection()?$filter=(ObjectId%20eq%20guid'" + objectId + "')" + "and" + "(ObjectTypeCode%20eq%20'" + entityName + "')";
+            
+            //construct query request based on available inputs
+            if (startDate_search != null)
+            {
+                resourcePath += "and" + "(CreatedOn%20ge%20'" + startDate_search + "')";
+            }
+            if (endDate_search != null)
+            {
+                resourcePath += "and" + "(CreatedOn%20le%20'" + endDate_search + "')";
+            }
+            if (searchString != null)
+            {
+                resourcePath += "and" + "(CreatedOn%20le%20'" + searchString + "')";
+            }
             string jsonData = string.Empty;
             var iStatus = this.RequestResource(storageAccount, accessKey, resourcePath, out jsonData);
             var result = JsonConvert.DeserializeObject<AzureRootObject>(jsonData);
@@ -117,6 +220,8 @@ namespace Starlight.AuditHistory.WebApi.Controllers
         {
             if (result != null)
             {
+              
+                //PROCESS EACH AUDIT RECORD : 
                 foreach (var item in result.value)
                 {
                     string strResourcePath = "AuditAttributeDetailCollection()?$filter=AuditId%20eq%20guid'" + item.AuditId + "'";
@@ -125,14 +230,16 @@ namespace Starlight.AuditHistory.WebApi.Controllers
                     var results = JsonConvert.DeserializeObject<AzureAttributeRoot>(strJsonData);
                     strOldValue = Convert.ToString(item.CreatedOn);
 
+                    //FOR EACH AUDIT(TRANSACTION) RECORD FETCH ALL ATTRIBUTE CHANGED VALUES
                     foreach (var auditdetail in results.value)
                     {
+                        //Console.WriteLine('>>>>>>>>> auditdetail = ' + auditdetail);
                         DataRow dtAzureValues = this.dtAzureCombined.NewRow();
                         dtAzureValues["AuditId"] = auditdetail.AuditId;
                         dtAzureValues["ChangedDate"] = Convert.ToString(item.CreatedOn);
                         dtAzureValues["Event"] = item.ActionName;
                         dtAzureValues["ChangedBy"] = item.UserName;
-                        dtAzureValues["ChangedField"] = auditdetail.AttributeName;
+                        dtAzureValues["ChangedField"] = auditdetail.AttributeDisplayName;
                         if (auditdetail.OldValue != "(no value)")
                         {
                             dtAzureValues["OldValue"] = auditdetail.OldValue;
@@ -170,10 +277,17 @@ namespace Starlight.AuditHistory.WebApi.Controllers
             query.ColumnSet = new ColumnSet(true);
             ConditionExpression objectTypeCheck = new ConditionExpression("objectid", ConditionOperator.Equal, objectId);
             ConditionExpression entityNameCheck = new ConditionExpression("objecttypecode", ConditionOperator.Equal, entityName);
+           
             FilterExpression queryFilterExp = new FilterExpression(LogicalOperator.And);
             queryFilterExp.Conditions.AddRange(objectTypeCheck);
             queryFilterExp.Conditions.AddRange(entityNameCheck);
+            if (searchString != null)
+            {
+                ConditionExpression fieldNameCheck = new ConditionExpression("objecttypecode", ConditionOperator.Equal, entityName);
+                queryFilterExp.Conditions.AddRange(fieldNameCheck);
+            }
             query.Criteria.AddFilter(queryFilterExp);
+            query.AddOrder("createdon", OrderType.Descending);
             EntityCollection auditDetails = this.organizationService.RetrieveMultiple(query);
             List<AuditDetails> lstDetails = new List<AuditDetails>();
             if (auditDetails != null && auditDetails.Entities.Count > 0)
@@ -185,6 +299,10 @@ namespace Starlight.AuditHistory.WebApi.Controllers
                         AuditId = ent.Id
                     };
                     var auditDetailsResponse = (RetrieveAuditDetailsResponse)this.organizationService.Execute(auditDetailsRequest);
+                    //GET TABLE LABLE
+                    EntityLogicalName = auditDetailsResponse.AuditDetail.AuditRecord.GetAttributeValue<string>("objecttypecode");
+                    EntityMetaResponse = getRetrieveEntityResponse(EntityLogicalName);
+                    EntiryDisplayName = EntityMetaResponse.EntityMetadata.DisplayName.LocalizedLabels[0].Label;
                     this.FetchAuditDetails(auditDetailsResponse.AuditDetail);
                 }
 
@@ -271,12 +389,38 @@ namespace Starlight.AuditHistory.WebApi.Controllers
             if (detailType == typeof(AttributeAuditDetail))
             {
                 var attributeDetail = (AttributeAuditDetail)detail;
+                string AttributeDisplayName = "";
                 if (attributeDetail.NewValue != null)
                 {
                     foreach (KeyValuePair<string, object> attribute in attributeDetail.NewValue.Attributes)
                     {
                         counter = counter + 1;
                         string oldValue = string.Empty, newValue = string.Empty;
+                        //*********************GET AttributeDisplayName 
+                        string AttrFullLogicalName = EntityLogicalName + ":" + attribute.Key;
+                        if (!AttrFullNameDispNameMap.ContainsKey(AttrFullLogicalName)) { 
+                            for (int iCnt = 0; iCnt < EntityMetaResponse.EntityMetadata.Attributes.ToList().Count; iCnt++)
+                            {
+                                if (EntityMetaResponse.EntityMetadata.Attributes.ToList()[iCnt].DisplayName.LocalizedLabels.Count > 0)
+                                {
+                                    if (EntityMetaResponse.EntityMetadata.Attributes.ToList()[iCnt].LogicalName == attribute.Key)
+                                    {
+                                        AttributeDisplayName = EntityMetaResponse.EntityMetadata.Attributes.ToList()[iCnt].DisplayName.LocalizedLabels[0].Label;
+                                        if (AttributeDisplayName == "" || AttributeDisplayName == null)
+                                        {
+                                            Console.WriteLine("################ Attribute Display name is empty ");
+                                        }
+                                        AttrFullNameDispNameMap.Add(AttrFullLogicalName, AttributeDisplayName);
+                                        string logicalName = EntityMetaResponse.EntityMetadata.Attributes.ToList()[iCnt].LogicalName;
+                                        break;
+                                    }
+                                }
+                            }
+                        }else
+                        {
+                            AttrFullNameDispNameMap.TryGetValue(AttrFullLogicalName, out AttributeDisplayName);
+                        }
+                        //************************************
                         if (attributeDetail.OldValue.Contains(attribute.Key))
                         {
                             oldValue = attributeDetail.OldValue[attribute.Key].ToString();
@@ -312,7 +456,7 @@ namespace Starlight.AuditHistory.WebApi.Controllers
                         dr["ChangedDate"] = Convert.ToString(detail.AuditRecord.GetAttributeValue<DateTime>("createdon"));
                         dr["Event"] = detail.AuditRecord.FormattedValues["operation"];
                         dr["ChangedBy"] = detail.AuditRecord.GetAttributeValue<EntityReference>("userid").Name;
-                        dr["ChangedField"] = attribute.Key;
+                        dr["ChangedField"] = AttributeDisplayName;// attribute.Key;
                         dr["OldValue"] = oldValue;
                         dr["NewValue"] = newValue;
                         this.dtcombined.Rows.Add(dr);
@@ -341,7 +485,7 @@ namespace Starlight.AuditHistory.WebApi.Controllers
                             dr["ChangedDate"] = Convert.ToString(detail.AuditRecord.GetAttributeValue<DateTime>("createdon"));
                             dr["Event"] = detail.AuditRecord.FormattedValues["action"];
                             dr["ChangedBy"] = detail.AuditRecord.GetAttributeValue<EntityReference>("userid").Name;
-                            dr["ChangedField"] = attribute.Key;
+                            dr["ChangedField"] = AttributeDisplayName;// attribute.Key;
                             dr["OldValue"] = oldValue;
                             dr["NewValue"] = string.Empty;
                             this.dtcombined.Rows.Add(dr);
@@ -358,13 +502,24 @@ namespace Starlight.AuditHistory.WebApi.Controllers
         {
             try
             {
-                ClientCredentials credentials = new ClientCredentials();
-                credentials.UserName.UserName = ConfigurationManager.AppSettings["UserName"];
-                string password = ConfigurationManager.AppSettings["Password"];
-                credentials.UserName.Password = this.DecodePassword(password);
+                string clientId = ConfigurationManager.AppSettings["CLENT_ID"];
+                string clientSecret = ConfigurationManager.AppSettings["CLIENT_SECRET"];
+                ClientCredential credentials = new ClientCredential(clientId, clientSecret);
                 ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
-                var serviceUrl = ConfigurationManager.AppSettings["ServiceUrl"];
-                this.organizationService = (IOrganizationService)new OrganizationServiceProxy(new Uri(serviceUrl), null, credentials, null);
+                string domain = ConfigurationManager.AppSettings["DOMAIN"];
+                string url = $"https://{domain}.api.crm.dynamics.com";
+                OrganizationServiceContext xrmContext;
+                OrganizationWebProxyClient webProxyClient;
+
+                AuthenticationParameters authParam = AuthenticationParameters.CreateFromUrlAsync(new Uri(url + "/api/data/")).Result;// CreateFromResourceUrlAsync(new Uri(url + "/api/data/")).Result;
+                var authority = authParam.Authority.Replace(@"oauth2/authorize", "");
+                AuthenticationContext authContext = new AuthenticationContext(authority, false);
+                AuthenticationResult authenticationResult = authContext.AcquireTokenAsync(url, credentials).Result;
+                webProxyClient = new OrganizationWebProxyClient(new Uri(url + @"/xrmservices/2011/organization.svc/web?SdkClientVersion=8.2"), false);//TODO:Change version to 9.2
+                webProxyClient.HeaderToken = authenticationResult.AccessToken;
+                this.organizationService = (IOrganizationService)webProxyClient;  //new OrganizationServiceProxy(new Uri(serviceUrl), null, credentials, null);
+                Guid orgId = ((WhoAmIResponse)this.organizationService.Execute(new WhoAmIRequest())).OrganizationId;
+                Console.WriteLine("User Login Success");
             }
             catch (Exception ex)
             {
@@ -389,10 +544,10 @@ namespace Starlight.AuditHistory.WebApi.Controllers
             request.ContentLength = 0;
             request.Accept = "application/json;odata=nometadata";
             request.Headers.Add("x-ms-date", DateTime.UtcNow.ToString("R", System.Globalization.CultureInfo.InvariantCulture));
-            request.Headers.Add("x-ms-version", "2015-04-05");
+            request.Headers.Add("x-ms-version", "2015-12-11");
             request.Headers.Add("Accept-Charset", "UTF-8");
             request.Headers.Add("MaxDataServiceVersion", "3.0;NetFx");
-            request.Headers.Add("DataServiceVersion", "1.0;NetFx");
+            request.Headers.Add("DataServiceVersion", "3.0;NetFx");
             string stringToSign = request.Headers["x-ms-date"] + "\n";
             int query = resourcePath.IndexOf("?");
             var resourcePathString = string.Empty;
@@ -402,6 +557,8 @@ namespace Starlight.AuditHistory.WebApi.Controllers
             }
 
             stringToSign += "/" + storageAccount + "/" + resourcePathString;
+            //string testaccessKey = accessKey.Replace("_", "/").Replace("-", "+") + new string('=', (4 - accessKey.Length % 4) % 4);
+
             System.Security.Cryptography.HMACSHA256 hasher = new System.Security.Cryptography.HMACSHA256(Convert.FromBase64String(accessKey));
             string strAuthorization = "SharedKeyLite " + storageAccount + ":" + System.Convert.ToBase64String(hasher.ComputeHash(System.Text.Encoding.UTF8.GetBytes(stringToSign)));
             request.Headers.Add("Authorization", strAuthorization);
@@ -455,6 +612,16 @@ namespace Starlight.AuditHistory.WebApi.Controllers
             string result = new String(decoded_char);
             return result;
         }
+        public RetrieveEntityResponse getRetrieveEntityResponse(string EntityLogicalName)
+        {
+            RetrieveEntityRequest req = new RetrieveEntityRequest();
+            req.RetrieveAsIfPublished = true;
+            req.LogicalName = EntityLogicalName;
+            req.EntityFilters = EntityFilters.Attributes;
 
+            RetrieveEntityResponse resp = (RetrieveEntityResponse)  organizationService.Execute(req);
+
+            return resp;
+        }
     }
 }
